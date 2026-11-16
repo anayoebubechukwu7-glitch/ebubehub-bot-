@@ -1,0 +1,120 @@
+const { default: makeWASocket, useMultiFileAuthState, downloadMediaMessage, DisconnectReason } = require('@whiskeysockets/baileys')
+const P = require('pino')
+const express = require('express')
+
+// Koyeb needs a web server to stay alive
+const app = express()
+const PORT = process.env.PORT || 8000
+
+app.get("/", (req, res) => {
+    res.send(`
+    <h1>🔥 EBUBEHUB BOT ON KOYEB - LIVE</h1>
+    <p>Bot is running 24/7</p>
+    <p>If you see this, your bot hosting is working!</p>
+    <p>Check logs in Koyeb dashboard for QR Code</p>
+    `)
+})
+
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT} - Koyeb will keep it alive`)
+})
+
+console.log("🔥 Starting Ebubehub Bot for Koyeb...")
+
+const deletedCache = {}
+
+async function startBot() {
+    const { state, saveCreds } = await useMultiFileAuthState('koyeb_auth')
+    const sock = makeWASocket({
+        auth: state,
+        logger: P({ level: 'silent' }),
+        printQRInTerminal: true,
+        browser: ["Ebubehub", "Chrome", "1.0"]
+    })
+
+    sock.ev.on('creds.update', saveCreds)
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut
+            if (shouldReconnect) {
+                console.log("Reconnecting to WhatsApp...")
+                startBot()
+            } else {
+                console.log("Logged out, delete koyeb_auth folder and restart")
+            }
+        } else if (connection === 'open') {
+            console.log('✅ EBUBEHUB BOT CONNECTED ON KOYEB - 24/7 LIVE!')
+        }
+    })
+
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+        for (const msg of messages) {
+            if (!msg.message) continue
+
+            // AUTO STATUS VIEW
+            if (msg.key.remoteJid === 'status@broadcast') {
+                await sock.readMessages([msg.key])
+                continue
+            }
+
+            const from = msg.key.remoteJid
+            const text = msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || ""
+            const lower = text.toLowerCase().trim()
+
+            if (!deletedCache[from]) deletedCache[from] = []
+            deletedCache[from].push(msg)
+
+            // MENU
+            if (lower === '.menu') {
+                await sock.sendMessage(from, { text: `*🤖 EBUBEHUB BOT v2 - KOYEB 24/7*\n\n.menu - menu\n.ping - alive\n.sticker - image to sticker\n.save - save View Once\n.business - services\n\n✅ Auto Sticker\n✅ Auto Status View\n✅ Anti-Delete\n✅ View Once Saver\n\n*Hosted on Koyeb.com - Never Sleeps*` })
+            }
+
+            if (lower === '.ping') {
+                await sock.sendMessage(from, { text: `⚡ *KOYEB BOT ALIVE*\nHosting: Koyeb.com\nUptime: 24/7\nSpeed: Fast` })
+            }
+
+            // VIEW ONCE SAVER - FIXES YOUR ERROR
+            const viewOnce = msg.message.viewOnceMessageV2 || msg.message.viewOnceMessage
+            const quoted = msg.message.extendedTextMessage?.contextInfo?.quotedMessage
+            const quotedViewOnce = quoted?.viewOnceMessageV2 || quoted?.viewOnceMessage
+
+            if (viewOnce || quotedViewOnce || lower === '.save') {
+                try {
+                    let target = msg
+                    if (quotedViewOnce) {
+                        target = { message: quoted, key: msg.key }
+                    }
+                    const buffer = await downloadMediaMessage(target, 'buffer', {}, { logger: P({ level: 'silent' }) })
+                    await sock.sendMessage(from, { image: buffer, caption: '✅ View Once Saved - Ebubehub Koyeb Bot' })
+                } catch (e) {
+                    await sock.sendMessage(from, { text: '❌ Failed!\n1. Dont open View Once\n2. Long press bubble\n3. Reply\n4. Type .save' })
+                }
+            }
+
+            // AUTO STICKER
+            if (msg.message.imageMessage || msg.message.videoMessage) {
+                try {
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {})
+                    await sock.sendMessage(from, { sticker: buffer })
+                } catch (e) {}
+            }
+        }
+    })
+
+    // ANTI-DELETE
+    sock.ev.on('messages.update', async (updates) => {
+        for (const u of updates) {
+            if (u.update.message === null) {
+                const jid = u.key.remoteJid
+                const found = (deletedCache[jid] || []).find(m => m.key.id === u.key.id)
+                if (found) {
+                    await sock.sendMessage(jid, { text: `🚨 *ANTI-DELETE*\nDeleted: ${found.message.conversation || 'Media'}\n_Recovered_` })
+                }
+            }
+        }
+    })
+}
+
+startBot()
